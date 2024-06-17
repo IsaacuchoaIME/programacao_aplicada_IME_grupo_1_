@@ -1,0 +1,301 @@
+from qgis.PyQt.QtCore import QCoreApplication, QVariant
+from qgis.core import (QgsProcessing,
+                       QgsFeatureSink,
+                       QgsProcessingException,
+                       QgsProcessingAlgorithm,
+                       QgsProcessingParameterFeatureSource,
+                       QgsProcessingParameterFeatureSink,
+                       QgsProcessingParameterNumber,
+                       QgsProcessingParameterField,
+                       QgsFeature,
+                       QgsGeometry,
+                       QgsPoint,
+                       QgsFields,
+                       QgsField,
+                       QgsWkbTypes,
+                       QgsVectorLayer,
+                       QgsFeatureRequest,
+                       QgsDataProvider,
+                       QgsSpatialIndex,
+                       QgsExpression,
+                       QgsExpressionContext,
+                       QgsExpressionContextUtils)
+from qgis import processing
+
+
+class Projeto3Solucao(QgsProcessingAlgorithm):
+    # INPUTS
+    TRACKER = 'TRACKER'
+    CMD1 = 'CMD1'
+    CMD2 = 'CMD2'
+    TOLERANCE = 'TOLERANCE'
+    PRIMARY_KEY = 'PRIMARY_KEY'
+    IGNORE_FIELDS = 'IGNORE_FIELDS'
+
+    # OUTPUTS
+    OUT_MODIFIED = 'OUT_MODIFIED'
+
+    def tr(self, string):
+        return QCoreApplication.translate('Processing', string)
+
+    def createInstance(self):
+        return ExampleProcessingAlgorithm()
+
+    def initAlgorithm(self, config=None):
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.TRACKER,
+                self.tr('Camada tracker'),
+                [QgsProcessing.TypeVectorPoint]
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.CMD1,
+                self.tr('Camada das Edificações (dia 1)'),
+                [QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.CMD2,
+                self.tr('Camada das Edificações (dia 2)'),
+                [QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.TOLERANCE,
+                self.tr('Distância de Tolerância (metros)'),
+                QgsProcessingParameterNumber.Double,
+                defaultValue=10.0
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterField(
+                self.PRIMARY_KEY,
+                self.tr('Chave primária'),
+                parentLayerParameterName=self.CMD2,
+                allowMultiple=False,
+                optional=False,
+                # type=QgsProcessingParameterField.Attribute,
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterField(
+                self.IGNORE_FIELDS,
+                self.tr('Campos ignorados'),
+                parentLayerParameterName=self.CMD2,
+                allowMultiple=True,
+                optional=True,
+                # type=QgsProcessingParameterField.Attribute,
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterFeatureSink(
+                self.OUT_MODIFIED,
+                self.tr('Feições modificadas fora do buffer')
+            )
+        )
+
+    def processAlgorithm(self, parameters, context, feedback):
+
+        source_tracker = self.parameterAsSource(
+            parameters,
+            self.TRACKER,
+            context
+        )
+        source1 = self.parameterAsSource(
+            parameters,
+            self.CMD1,
+            context
+        )
+        source2 = self.parameterAsSource(
+            parameters,
+            self.CMD2,
+            context
+        )
+        tolerance_meters = self.parameterAsDouble(
+            parameters,
+            self.TOLERANCE,
+            context
+        )
+
+        if source_tracker is None:
+            raise QgsProcessingException(self.invalidSourceError(parameters, self.TRACKER))
+        # Verificar se as camadas têm o mesmo tipo de geometria
+        if source1.wkbType() != source2.wkbType():
+            raise QgsProcessingException("Os tipos de geometria das camadas CMD1 e CMD2 não são iguais.")
+
+        fields = source2.fields()
+        fields.append(QgsField('tipo de mudança', QVariant.String))  # Adicionar novo campo de atributo
+
+        (sink, dest_id) = self.parameterAsSink(
+            parameters,
+            self.OUT_MODIFIED,
+            context,
+            fields,
+            source2.wkbType(),
+            source2.sourceCrs()
+        )
+
+        if sink is None:
+            raise QgsProcessingException(self.invalidSinkError(parameters, self.OUT_MODIFIED))
+
+        primary_key_field = self.parameterAsString(
+            parameters,
+            self.PRIMARY_KEY,
+            context
+        )
+
+        ignore_fields = self.parameterAsFields(
+            parameters,
+            self.IGNORE_FIELDS,
+            context
+        )
+
+        ################# CONVERSÃO DE METROS PARA GRAUS #################
+        # Aproximar a conversão de metros para graus (1 grau de latitude é aproximadamente 111.32 km)
+        meters_per_degree = 111320
+        tolerance_degrees = tolerance_meters / meters_per_degree
+
+        ################# CRIAR CAMADA DE ITINERÁRIO #################
+        features = list(source_tracker.getFeatures())
+        sorted_features = sorted(features, key=lambda f: f['creation_time'])
+
+        points = [f.geometry().asPoint() for f in sorted_features if not f.geometry().isMultipart()]
+
+        if points:
+            line_feature = QgsFeature()
+            line_feature.setGeometry(QgsGeometry.fromPolylineXY(points))
+            line_feature.setAttributes([1])
+
+            # Criar uma camada temporária para a linha
+            line_layer = QgsVectorLayer('LineString?crs=' + source_tracker.sourceCrs().authid(), 'Itinerário',
+                                        'memory')
+            provider = line_layer.dataProvider()
+
+            # Definir os campos da camada temporária
+            provider.addAttributes([QgsField('id', QVariant.Int)])
+            line_layer.updateFields()
+
+            # Iniciar edição, adicionar a linha e aplicar as mudanças
+            line_layer.startEditing()
+            provider.addFeature(line_feature)
+            line_layer.commitChanges()
+            line_layer.updateExtents()
+
+        feedback.pushInfo(f'CRS is {source_tracker.sourceCrs().authid()}')
+
+        ################ ALGORITMO DE ALTERAÇÕES NAS FEIÇÕES ################
+
+        # Dicionários para armazenar feições por ID
+        original_features = {f[primary_key_field]: f for f in source1.getFeatures()}
+        modified_features = {f[primary_key_field]: f for f in source2.getFeatures() if
+                             f[primary_key_field] not in ignore_fields}
+
+        # Criação da camada que vai armazenar as feições que foram modificadas
+        modified_layer = QgsVectorLayer(
+            f"{QgsWkbTypes.displayString(source2.wkbType())}?crs={source2.sourceCrs().authid()}",
+            'Modified Features', 'memory')
+        modified_provider = modified_layer.dataProvider()
+        modified_provider.addAttributes(source2.fields().toList())
+        modified_layer.updateFields()
+        modified_layer.startEditing()
+        countgeom = 0
+        countattr = 0
+
+        # buffer em torno do itinerário
+        buffer_result = processing.run(
+            'native:buffer',
+            {
+                'INPUT': line_layer,
+                'DISTANCE': tolerance_degrees,
+                'SEGMENTS': 5,
+                'END_CAP_STYLE': 0,
+                'JOIN_STYLE': 0,
+                'MITER_LIMIT': 2,
+                'DISSOLVE': False,
+                'OUTPUT': 'memory:'
+            },
+            context=context, feedback=feedback
+        )
+
+        buffer_layer = buffer_result['OUTPUT']
+
+        ################ ALGORITMO DE ALTERAÇÕES NAS FEIÇÕES ################
+        for mod_id, mod_feature in modified_features.items():
+            tipo_de_mudanca = None  # Variável para armazenar o tipo de mudança
+            atributos_modificados = []  # Lista para armazenar os nomes dos atributos modificados
+
+            # Verificar se a feição modificada intersecta com o buffer
+            intersects = False
+            for buffer_feature in buffer_layer.getFeatures():
+                if mod_feature.geometry().intersects(buffer_feature.geometry()):
+                    intersects = True
+                    break
+
+            if not intersects:  # Adicionar ao sink somente se não intersectar
+                if mod_id not in original_features:
+                    tipo_de_mudanca = 'Adicionado'
+                else:
+                    original_geom_type = original_features[mod_id].geometry().asWkt()
+                    modified_geom_type = mod_feature.geometry().asWkt()
+                    if original_geom_type != modified_geom_type:
+                        tipo_de_mudanca = 'Geométrico'
+                    else:
+                        # Verificar se algum atributo foi modificado
+                        original_attrs = original_features[mod_id].attributes()
+                        modified_attrs = mod_feature.attributes()
+                        attrs_changed = False
+                        for idx, (orig_attr, mod_attr) in enumerate(zip(original_attrs, modified_attrs)):
+                            if idx == 0:  # Ignorar o atributo de geometria
+                                continue
+                            field_name = source2.fields().at(idx).name()
+                            if orig_attr != mod_attr and field_name not in ignore_fields:
+                                attrs_changed = True
+                                atributos_modificados.append(field_name)
+
+                        if attrs_changed:
+                            tipo_de_mudanca = 'Atributo: ' + ', '.join(atributos_modificados)
+
+                if tipo_de_mudanca:
+                    new_attrs = mod_feature.attributes() + [tipo_de_mudanca]
+                    mod_feature.setAttributes(new_attrs)
+                    sink.addFeature(mod_feature, QgsFeatureSink.FastInsert)
+
+        for orig_id, orig_feature in original_features.items():
+            if orig_id not in modified_features:
+                new_attrs = orig_feature.attributes() + ['Removido']
+                orig_feature.setAttributes(new_attrs)
+                sink.addFeature(orig_feature, QgsFeatureSink.FastInsert)
+        modified_layer.commitChanges()
+        modified_layer.updateExtents()
+
+        # Criar um índice espacial para a camada modificada
+        index = QgsSpatialIndex(modified_layer.getFeatures())
+
+        return {self.OUT_MODIFIED: dest_id}
+
+    def name(self):
+        return 'Solução do Projeto 3'
+
+    def displayName(self):
+        return self.tr(self.name())
+
+    def group(self):
+        return self.tr(self.groupId())
+
+    def groupId(self):
+        return 'Projeto 3'
+
+    def tr(self, string):
+        return QCoreApplication.translate('Processing', string)
+
+    def createInstance(self):
+        return Projeto3Solucao()

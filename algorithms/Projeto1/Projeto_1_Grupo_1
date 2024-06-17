@@ -1,0 +1,471 @@
+# -- coding: utf-8 --
+
+"""
+***
+*                                                                         *
+*   This program is free software; you can redistribute it and/or modify  *
+*   it under the terms of the GNU General Public License as published by  *
+*   the Free Software Foundation; either version 2 of the License, or     *
+*   (at your option) any later version.                                   *
+*                                                                         *
+***
+"""
+from qgis.core import QgsCoordinateReferenceSystem
+from qgis.PyQt.QtCore import QCoreApplication
+from qgis.core import (QgsProcessing,
+                       QgsFeatureSink,
+                       QgsProcessingException,
+                       QgsProcessingAlgorithm,
+                       QgsProcessingParameterFeatureSource,
+                       QgsProcessingParameterFeatureSink,
+                       QgsProcessingParameterDistance,
+                       QgsProcessingParameterRasterDestination,
+                       QgsProcessingMultiStepFeedback)
+from qgis import processing
+from qgis.core import QgsProject
+
+
+class ExampleProcessingAlgorithm(QgsProcessingAlgorithm):
+    """
+    This is an example algorithm that takes a vector layer and
+    creates a new identical one.
+
+    It is meant to be used as an example of how to create your own
+    algorithms and explain methods and variables used to do it. An
+    algorithm like this will be available in all elements, and there
+    is not need for additional work.
+
+    All Processing algorithms should extend the QgsProcessingAlgorithm
+    class.
+    """
+
+
+    # Constants used to refer to parameters and outputs. They will be
+    # used when calling the algorithm from another algorithm, or when
+    # calling from the QGIS console.
+    
+    INPUT = 'INPUT'
+    VIA = 'VIA' #Camada vias de deslocamento
+    RVIA = 'RVIA' # buffer da via 
+    VGT = 'VGT' # camada vegetação 
+    MDA = 'MDA' # Camada Massa d'água
+    TD = 'TD'   # Camada Trecho de drenagem 
+    RTD = 'RTD'  # Raio do buffer do trecho de drenagem 
+    RMC ='RMC'  # Raio do buffer mata ciliar 
+    AED ='AED'  # Camada Área edificada
+    ASD ='ASD'  # Área sem dados 
+    MDT = 'MDT' # MDT
+    TP = 'TP'   # Tamanho do pixel 
+
+    OUTPUT = 'OUTPUT'
+    
+    def tr(self, string):
+        """
+        Returns a translatable string with the self.tr() function.
+        """
+        return QCoreApplication.translate('Processing', string)
+
+    def createInstance(self):
+        return ExampleProcessingAlgorithm()
+
+    def name(self):
+        return 'mapatrafegabilidade'
+
+    def displayName(self):
+        return self.tr('Mapa de Trafegabilidade')
+
+    def group(self):
+        return self.tr('Projeto1')
+
+    def groupId(self):
+        return 'examplescripts'
+
+    def shortHelpString(self):
+        return self.tr("Este algoritmo recebe camadas, valores para raios de buffers, valor para o tamanho do pixel e entrega como saída uma camada rasterizada com 4 valores de pixel (0, 1, 2 e 3) que correspondem, respectivamente a: \n0: 'Área sem dados',\n1: 'Adequado',\n2: 'Restritivo', \n3: 'Impeditivo'. ")
+
+    def initAlgorithm(self, config=None):
+        
+        # We add the input vector features source. It can have any kind of
+        # geometry.
+    
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.VIA,
+                self.tr('Camada de vias de deslocamento'),
+                [QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+       
+        self.addParameter (
+            QgsProcessingParameterDistance (
+                self.RVIA,
+                self.tr('Buffer para a via de deslocamento' ),
+                parentParameterName =self.VIA ,
+                minValue=0,
+                defaultValue =1.0
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.VGT,
+                self.tr('Camada Vegetacao'),
+                [QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.MDA,
+                self.tr("Camada massa dágua"),
+                [QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.TD,
+                self.tr('Trecho de drenagem'),
+                [QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterDistance (
+                self.RTD,
+                self.tr('Raio do buffer do trecho de drenagem' ),
+                parentParameterName =self.VIA ,
+                minValue=0,
+                defaultValue =1.0
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.AED,
+                self.tr('Camada da area edificada'),
+                [QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterDistance (
+                self.RMC,
+                self.tr('Raio do buffer da mata ciliar' ),
+                parentParameterName =self.VIA ,
+                minValue=0,
+                defaultValue =1.0
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterDistance(
+                self.TP,
+                self.tr('Tamanho do pixel'),
+                parentParameterName =self.TP ,
+                minValue=0,
+                defaultValue =1.0
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.ASD,
+                self.tr('Area sem Dados'),
+                [QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.MDT,
+                self.tr('Camada MDT'),
+                [QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+        
+        # We add a feature sink in which to store our processed features (this
+        # usually takes the form of a newly created vector layer when the
+        # algorithm is run in QGIS).
+        self.addParameter(
+            QgsProcessingParameterRasterDestination(
+                self.OUTPUT,
+                self.tr('Mapa de trafegabilidade')
+            )
+        )
+
+        # Retrieve the feature source and sink. The 'dest_id' variable is used
+        # to uniquely identify the feature sink, and must be included in the
+        # dictionary returned by the processAlgorithm function.
+    def processAlgorithm(self, parameters, context, feedback):
+        vias = self.parameterAsVectorLayer(
+            parameters,
+            self.VIA,
+            context
+        )
+        
+        vegetacao = self.parameterAsVectorLayer(
+            parameters,
+            self.VGT,
+            context
+        )
+        
+        drenagem = self.parameterAsVectorLayer(
+            parameters,
+            self.TD,
+            context
+        )
+        
+        mdagua = self.parameterAsVectorLayer(
+            parameters,
+            self.MDA,
+            context
+        )
+        
+        RTD = self.parameterAsDouble(
+        parameters, 
+        self.RTD, 
+        context
+        )
+
+        if vias is None:
+            raise QgsProcessingException(self.invalidSourceError(parameters, self.INPUT))
+        if vegetacao is None:
+            raise QgsProcessingException(self.invalidSourceError(parameters, self.INPUT))
+        if drenagem is None:
+            raise QgsProcessingException(self.invalidSourceError(parameters, self.INPUT))
+        if mdagua is None:
+            raise QgsProcessingException(self.invalidSourceError(parameters, self.INPUT))
+
+        (sink, dest_id) = self.parameterAsSink(
+            parameters,
+            self.OUTPUT,
+            context,
+            vias.fields(),
+            vias.wkbType(),
+            vias.sourceCrs()
+        )
+
+        # Send some information to the user
+        feedback.pushInfo(f'CRS is {vias.sourceCrs().authid()}')
+
+        # If sink was not created, throw an exception to indicate that the algorithm
+        # encountered a fatal error. The exception text can be any string, but in this
+        # case we use the pre-built invalidSinkError method to return a standard
+        # helper text for when a sink cannot be evaluated
+        if sink is None:
+            raise QgsProcessingException(self.invalidSinkError(parameters, self.OUTPUT))
+        
+        #####CAMADASRODOVIAS#####
+        #FEDERAIS (ADEQUADO)
+        rodoviasFederais = processing.run("native:extractbyexpression", 
+            {'INPUT': vias,
+            'EXPRESSION':'"tipo" = 2 and "jurisdicao" = 1',
+            'OUTPUT':'TEMPORARY_OUTPUT'}
+            )
+        #ESTADUAIS (ADEQUADO)
+        rodoviasEstaduais = processing.run("native:extractbyexpression", 
+            {'INPUT': vias,
+            'EXPRESSION':'"tipo" = 2 and "jurisdicao" = 2',
+            'OUTPUT':'TEMPORARY_OUTPUT'}
+            )
+        #JURISDICAO DESCONHECIDA (RESTRITO)
+        rodoviasDesconhecidas = processing.run("native:extractbyexpression", 
+            {'INPUT': vias,
+            'EXPRESSION':'"jurisdicao" = 0',
+            'OUTPUT':'TEMPORARY_OUTPUT'}
+            )
+            
+        #####CAMADASVEGETAÇÃO#####
+        #FLORESTAS DENSAS (IMPEDITIVO)
+        florestasDensas = processing.run("native:extractbyexpression", 
+            {'INPUT': vegetacao,
+            'EXPRESSION':'"tipo" = 602',
+            'OUTPUT':'TEMPORARY_OUTPUT'}
+            )
+        #FLORESTAS ESPARSAS(IMPEDITIVO)
+        florestasEsparsas = processing.run("native:extractbyexpression", 
+            {'INPUT': vegetacao,
+            'EXPRESSION':'"tipo" = 601',
+            'OUTPUT':'TEMPORARY_OUTPUT'}
+            )
+        #TERRENO EXPOSTO (ADEQUADO)
+        terrenosExpostos = processing.run("native:extractbyexpression", 
+            {'INPUT': vegetacao,
+            'EXPRESSION':'"tipo" = 1000',
+            'OUTPUT':'TEMPORARY_OUTPUT'}
+            )
+        #CAMPOS CULTIVADOS (RESTRITIVO)
+        camposCultivados = processing.run("native:extractbyexpression", 
+            {'INPUT': vegetacao,
+            'EXPRESSION':'"tipo" = 196',
+            'OUTPUT':'TEMPORARY_OUTPUT'}
+            )
+        #CAMPOS ABERTOS(RESTRITIVO)
+        camposAbertos = processing.run("native:extractbyexpression", 
+            {'INPUT': vegetacao,
+            'EXPRESSION':'"tipo" = 901',
+            'OUTPUT':'TEMPORARY_OUTPUT'}
+            )
+        #####CAMADAS DRENAGEM#####
+        #DRENAGEM SEM CANAIS
+        drenagemSemCanais = processing.run("native:extractbyexpression", 
+            {'INPUT': drenagem,
+            'EXPRESSION':'"tipo" = 1',
+            'OUTPUT':'TEMPORARY_OUTPUT'}
+            )
+        #CANAIS
+        drenagemSemCanais = processing.run("native:extractbyexpression", 
+            {'INPUT': drenagem,
+            'EXPRESSION':'"tipo" = 2',
+            'OUTPUT':'TEMPORARY_OUTPUT'}
+            )
+        #MATA CILIAR DRENAGEM
+        # BUFFER DRENAGEM
+        bufferDrenagem = processing.run ("native:buffer",
+            {
+            'INPUT' : drenagem,
+            'DISTANCE' : RTD,
+            'OUTPUT' : 'TEMPORARY_OUTPUT'
+            }     
+        )
+          
+        # BUFFER MASSA D'AGUA
+        bufferMassaAgua = processing.run ("native:buffer",
+        {
+        'INPUT' : mdagua ,
+        'DISTANCE' : RTD,
+        'OUTPUT' : 'TEMPORARY_OUTPUT'
+        }
+        )
+    
+        #CRIANDOEXTENSAOPARAVIRARRASTER
+        extensao = processing.run("native:polygonfromlayerextent", 
+            {'INPUT':vegetacao,
+            'ROUND_TO':0,
+            'OUTPUT':'TEMPORARY_OUTPUT'})
+            
+        #CRIANDO CAMADA RASTER PELA EXTENSAO
+        camadaRaster = processing.run("native:createconstantrasterlayer", 
+            {'EXTENT':'548036.875000000,560128.750000000,6625641.500000000,6653406.500000000 [EPSG:31981]',
+            'TARGET_CRS':QgsCoordinateReferenceSystem('EPSG:31981'),
+            'PIXEL_SIZE':1,
+            'NUMBER':1,
+            'OUTPUT_TYPE':5,
+            'OUTPUT':'TEMPORARY_OUTPUT'})
+        
+        ###RASTERIZANDO AS CAMADAS TEMPORARIAS###
+        #FEDERAIS 
+        processing.run("gdal:rasterize_over_fixed_value", 
+            {'INPUT': camadaRaster,
+            'INPUT_RASTER':rodoviasFederais,
+            'BURN':1,
+            'ADD':False,
+            'EXTRA':''})
+
+        #ESTADUAIS
+        processing.run("gdal:rasterize_over_fixed_value", 
+            {'INPUT': camadaRaster,
+            'INPUT_RASTER':rodoviasEstaduais,
+            'BURN':1,
+            'ADD':False,
+            'EXTRA':''})
+        
+        
+        #FLORESTAS ESPARSAS
+        processing.run("gdal:rasterize_over_fixed_value", 
+            {'INPUT': camadaRaster,
+            'INPUT_RASTER':florestasEsparsas,
+            'BURN':3,
+            'ADD':False,
+            'EXTRA':''})
+            
+        #FLORESTAS DENSAS
+        processing.run("gdal:rasterize_over_fixed_value", 
+            {'INPUT': camadaRaster,
+            'INPUT_RASTER':florestasDensas,
+            'BURN':3,
+            'ADD':False,
+            'EXTRA':''})
+            
+        #CAMPO EXPOSTO
+        processing.run("gdal:rasterize_over_fixed_value", 
+            {'INPUT': camadaRaster,
+            'INPUT_RASTER':florestasDensas,
+            'BURN':1,
+            'ADD':False,
+            'EXTRA':''})
+        
+        #CAMPOS CULTIVADOS
+        processing.run("gdal:rasterize_over_fixed_value", 
+            {'INPUT': camadaRaster,
+            'INPUT_RASTER':camposCultivados,
+            'BURN':2,
+            'ADD':False,
+            'EXTRA':''})
+            
+        #CAMPOS ABERTOS
+        processing.run("gdal:rasterize_over_fixed_value", 
+            {'INPUT': camadaRaster,
+            'INPUT_RASTER':camposAbertos,
+            'BURN':2,
+            'ADD':False,
+            'EXTRA':''})
+            
+        #CANAIS
+        processing.run("gdal:rasterize_over_fixed_value", 
+            {'INPUT': camadaRaster,
+            'INPUT_RASTER':drenagemSemCanais,
+            'BURN':3,
+            'ADD':False,
+            'EXTRA':''})
+        
+        #BUFFER MASSA D'AGUA
+        processing.run("gdal:rasterize_over_fixed_value", 
+            {'INPUT': camadaRaster,
+            'INPUT_RASTER':bufferMassaAgua,
+            'BURN':3,
+            'ADD':False,
+            'EXTRA':''})
+            
+        # BUFFER DRENAGEM
+        processing.run("gdal:rasterize_over_fixed_value", 
+            {'INPUT': camadaRaster,
+            'INPUT_RASTER':bufferDrenagem,
+            'BURN':3,
+            'ADD':False,
+            'EXTRA':''})    
+            
+        
+        # Compute the number of steps to display within the progress bar and
+        # get features from source
+        total = 100.0 / vias.featureCount() if vias.featureCount() else 0
+        features = vias.getFeatures()
+
+        for current, feature in enumerate(features):
+            # Stop the algorithm if cancel button has been clicked
+            if feedback.isCanceled():
+                break
+
+            # Add a feature in the sink
+            sink.addFeature(feature, QgsFeatureSink.FastInsert)
+
+            # Update the progress bar
+            feedback.setProgress(int(current * total))
+
+
+        
+        # To run another Processing algorithm as part of this algorithm, you can use
+        # processing.run(...). Make sure you pass the current context and feedback
+        # to processing.run to ensure that all temporary layer outputs are available
+        # to the executed algorithm, and that the executed algorithm can send feedback
+        # reports to the user (and correctly handle cancellation and progress reports!)
+
+        # Return the results of the algorithm. In this case our only result is
+        # the feature sink which contains the processed features, but some
+        # algorithms may return multiple feature sinks, calculated numeric
+        # statistics, etc. These should all be included in the returned
+        # dictionary, with keys matching the feature corresponding parameter
+        # or output names.
+        return {self.OUTPUT: dest_id}

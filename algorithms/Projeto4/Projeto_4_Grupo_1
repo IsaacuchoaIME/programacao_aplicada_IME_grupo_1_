@@ -1,0 +1,451 @@
+from qgis.PyQt.QtCore import QCoreApplication, QVariant
+from qgis.core import (QgsProcessing,
+                       QgsFeatureSink,
+                       QgsProcessingException,
+                       QgsProcessingAlgorithm,
+                       QgsProcessingParameterFeatureSource,
+                       QgsProcessingParameterFeatureSink,
+                       QgsWkbTypes,
+                       QgsFeature,
+                       QgsGeometry,
+                       QgsPointXY,
+                       QgsFields,
+                       QgsField,
+                       QgsFeatureRequest,
+                       NULL)
+from qgis import processing
+from collections import defaultdict
+
+
+class Solucao4(QgsProcessingAlgorithm):
+
+    VIARIO = 'VIARIO'
+    DRENAGEM = 'DRENAGEM'
+    DESLOCAMENTO = 'DESLOCAMENTO'
+    BARRAGEM = 'BARRAGEM'
+    MASSADAGUA = 'MASSADAGUA'
+    OUTPUT = 'OUTPUT'
+
+    def tr(self, string):
+        return QCoreApplication.translate('Processing', string)
+
+    def createInstance(self):
+        return ExampleProcessingAlgorithm()
+
+    def name(self):
+        return 'projeto 4'
+
+    def displayName(self):
+        return self.tr('projeto 4')
+
+    def group(self):
+        return self.tr('progAplicada')
+
+    def groupId(self):
+        return 'progAplicada'
+
+    def shortHelpString(self):
+        return self.tr("Analisa erros nas diversas camadas e adiciona-os com uma descrição em uma camada de saída do tipo MultiPoint")
+
+    def initAlgorithm(self, config=None):
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.VIARIO,
+                self.tr('Elemento Viario'),
+                [QgsProcessing.SourceType.TypeVectorPoint]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.DRENAGEM,
+                self.tr('Trecho de Drenagem'),
+                [QgsProcessing.SourceType.TypeVectorLine]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.DESLOCAMENTO,
+                self.tr('Via de Deslocamento'),
+                [QgsProcessing.SourceType.TypeVectorLine]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.BARRAGEM,
+                self.tr('Barragem'),
+                [QgsProcessing.SourceType.TypeVectorLine]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.MASSADAGUA,
+                self.tr('Massa dagua'),
+                [QgsProcessing.SourceType.TypeVectorPolygon]
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterFeatureSink(
+                self.OUTPUT,
+                self.tr('Output layer')
+            )
+        )
+
+    def processAlgorithm(self, parameters, context, feedback):
+        ##Declarando camadas##
+        layers = [
+            self.parameterAsVectorLayer(parameters, self.VIARIO, context),
+            self.parameterAsVectorLayer(parameters, self.DRENAGEM, context),
+            self.parameterAsVectorLayer(parameters, self.DESLOCAMENTO, context),
+            self.parameterAsVectorLayer(parameters, self.BARRAGEM, context),
+            self.parameterAsVectorLayer(parameters, self.MASSADAGUA, context)
+        ]
+
+        # Campo 'tipo de erro' da camada sink
+        fields = QgsFields()
+        fields.append(QgsField('tipo de erro', QVariant.String))
+        fields.append(QgsField('sobreposto_transportes', QVariant.String))
+        fields.append(QgsField('trecho_drenagem_id', QVariant.String))
+        fields.append(QgsField('via_deslocamento_id', QVariant.String))
+        
+        # Camada sink
+        (sink, dest_id) = self.parameterAsSink(
+            parameters,
+            self.OUTPUT,
+            context,
+            fields,
+            QgsWkbTypes.Point,
+            layers[0].sourceCrs()
+        )
+
+        if sink is None:
+            raise QgsProcessingException(self.invalidSinkError(parameters, self.OUTPUT))
+
+        feedback.pushInfo("Iniciando o processamento das camadas...")
+        ##########REGRA 1 - PARTE 1(situacao_fisica)##########
+        for layer in layers:
+            if layer is None:
+                feedback.pushInfo("Camada não encontrada ou inválida.")
+                continue
+
+            feedback.pushInfo(f"Processando camada: {layer.sourceName()}")
+
+            layer_fields = layer.fields()
+            if 'situacao_fisica' not in [field.name() for field in layer_fields]:
+                feedback.pushInfo(f"Atributo 'situação física' não encontrado na camada {layer.sourceName()}.")
+                continue
+
+            # Usar o algoritmo de processamento nativo para selecionar feições
+            expression = f'"situacao_fisica" != 3'
+            feedback.pushInfo(f"Usando expressão de filtro: {expression}")
+
+            processing.run("qgis:selectbyexpression", {
+                'INPUT': layer,
+                'EXPRESSION': expression,
+                'METHOD': 0
+            }, context=context)
+
+            selected_features = layer.selectedFeatures()
+            feature_count = 0
+
+            for feature in selected_features:
+                feature_count += 1
+                point_feature = QgsFeature(fields)
+
+                geometry = feature.geometry()
+                if geometry.isEmpty():
+                    feedback.pushInfo(f"Geometria vazia encontrada na feature {feature.id()} da camada {layer.sourceName()}.")
+                    continue
+
+                if geometry.type() == QgsWkbTypes.PolygonGeometry:
+                    centroid = geometry.centroid().asPoint()
+                    point_feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(centroid)))
+                elif geometry.type() == QgsWkbTypes.PointGeometry:
+                    point_feature.setGeometry(geometry)
+                elif geometry.type() == QgsWkbTypes.LineGeometry:
+                    midpoint = geometry.interpolate(geometry.length() / 2).asPoint()
+                    point_feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(midpoint)))
+                else:
+                    feedback.pushInfo(f"Tipo de geometria não suportado na feature {feature.id()} da camada {layer.sourceName()}.")
+
+                point_feature.setAttribute('tipo de erro', "REGRA 1: Atributo 'situacao_fisica' incompatível.\nDeveria ser 'construída (3)'")
+
+                sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+
+            feedback.pushInfo(f"{feature_count} features processadas na camada {layer.sourceName()}.")
+        ##########REGRA 1 -PARTE 2(Material_construcao)(para vau natural)##########
+        feature_count = 0
+        for feature in layers[0].getFeatures():
+            if feature['tipo'] == 401 and feature['material_construcao'] != 97:
+                point_feature = QgsFeature(fields)
+                point_feature.setGeometry(geometry)
+                point_feature.setAttribute('tipo de erro', "REGRA 1: Atributo 'material_construcao' inválido.\nDeveria ser 'Não Aplicável (97)'")
+                sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+                feature_count += 1
+        
+        feedback.pushInfo(f"{feature_count} features processadas na camada {layers[0].sourceName()}.")
+        
+        ########## REGRA 1 - PARTE 3 (nr_faixas/nr_pistas) ##########
+        vias_layer = layers[2]
+        pontes_layer = layers[0]
+        # Processar a camada de vias de deslocamento
+        for feature in vias_layer.getFeatures():
+            nr_faixas = feature['nr_faixas']
+            nr_pistas = feature['nr_pistas']
+            point_feature = QgsFeature(fields)
+            
+            if feature.geometry().type() == QgsWkbTypes.LineGeometry:
+                midpoint = feature.geometry().interpolate(feature.geometry().length() / 2).asPoint()
+                point_feature.setGeometry(QgsGeometry.fromPointXY(midpoint))
+            else:
+                point_feature.setGeometry(feature.geometry())
+            
+            if nr_faixas == NULL or nr_pistas == NULL:
+                point_feature.setAttribute('tipo de erro', 'REGRA 1: nr_faixas ou nr_pistas são NULL nas vias de deslocamento')
+                sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+            else:
+                nr_faixas_int = int(nr_faixas)
+                nr_pistas_int = int(nr_pistas)
+                if nr_pistas_int < 1 or nr_faixas_int < 1 or nr_pistas_int > nr_faixas_int:
+                    point_feature.setAttribute('tipo de erro', 'REGRA 1: Problema com nr_faixas ou nr_pistas nas vias de deslocamento')
+                    sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+
+        # Processar a camada de pontes, verificando o tipo
+        for feature in pontes_layer.getFeatures():
+            if feature['tipo'] == 203:  # Somente processa as pontes
+                nr_faixas = feature['nr_faixas']
+                nr_pistas = feature['nr_pistas']
+                point_feature = QgsFeature(fields)
+                point_feature.setGeometry(feature.geometry())
+                
+                if nr_faixas == NULL or nr_pistas == NULL:
+                    point_feature.setAttribute('tipo de erro', 'REGRA 1: nr_faixas ou nr_pistas são NULL nas pontes')
+                    sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+                else:
+                    nr_faixas_int = int(nr_faixas)
+                    nr_pistas_int = int(nr_pistas)
+                    if nr_pistas_int < 1 or nr_faixas_int < 1 or nr_pistas_int > nr_faixas_int:
+                        point_feature.setAttribute('tipo de erro', 'REGRA 1: Problema com nr_faixas ou nr_pistas nas pontes')
+                        sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+
+        feedback.pushInfo("Processamento das regras de nr_faixas e nr_pistas concluído.")
+        
+        ##########REGRA 2 - Interseção entre Drenagem e Vias de Deslocamento########## 
+        via_deslocamento_layer = self.parameterAsVectorLayer(parameters, self.DESLOCAMENTO, context)
+        trecho_drenagem_layer = self.parameterAsVectorLayer(parameters, self.DRENAGEM, context)
+
+        intersection_result = processing.run("native:lineintersections", {
+            'INPUT': trecho_drenagem_layer,
+            'INTERSECT': via_deslocamento_layer,
+            'OUTPUT': 'memory:'
+        }, context=context, feedback=feedback)
+
+        intersection_counts = defaultdict(int)
+        for feature in intersection_result['OUTPUT'].getFeatures():
+            via_id = feature['id_2']
+            drenagem_id = feature['id']
+            intersection_counts[(via_id, drenagem_id)] += 1
+
+        # Procurar as feições na camada de drenagem e verificar se possuem múltiplas interseções com a mesma via de deslocamento
+        for (via_id, drenagem_id), count in intersection_counts.items():
+            if count > 1:
+                # Localizar a feição correspondente na camada de drenagem
+                for feature in trecho_drenagem_layer.getFeatures():
+                    if feature['id'] == drenagem_id:
+                        midpoint = feature.geometry().interpolate(feature.geometry().length() / 2).asPoint()
+                        point_feature = QgsFeature(fields)
+                        point_feature.setGeometry(QgsGeometry.fromPointXY(midpoint))
+                        point_feature.setAttribute('trecho_drenagem_id', drenagem_id)
+                        point_feature.setAttribute('via_deslocamento_id', via_id)
+                        point_feature.setAttribute('tipo de erro', 'REGRA 2: interseção múltipla com a mesma via')
+                        sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+                        break
+
+        feedback.pushInfo("Análise de interseção concluída.")
+
+        ########## REGRA 3 - Verificação de Tipos em Interseções entre Drenagem e Vias de Deslocamento ##########
+        import math
+        
+        def meters_to_degrees(meters, latitude):
+            meters_per_degree = 111000  # Aproximação para metros por grau de latitude
+            return meters / meters_per_degree, meters / (meters_per_degree * math.cos(math.radians(latitude)))
+        
+        via_deslocamento_layer = self.parameterAsVectorLayer(parameters, self.DESLOCAMENTO, context)
+        trecho_drenagem_layer = self.parameterAsVectorLayer(parameters, self.DRENAGEM, context)
+        viario_layer = self.parameterAsVectorLayer(parameters, self.VIARIO, context)
+
+        # Latitude média das feições, definida manualmente ou calculada
+        latitude_media = -23.5  # Exemplo, ajuste conforme sua área de estudo
+
+        # Converter 5 metros para graus
+        buffer_lat, buffer_lon = meters_to_degrees(5, latitude_media)
+
+        # Rodar o algoritmo de interseção entre linhas
+        intersection_result = processing.run("native:lineintersections", {
+            'INPUT': trecho_drenagem_layer,
+            'INTERSECT': via_deslocamento_layer,
+            'OUTPUT': 'memory:'
+        }, context=context, feedback=feedback)
+
+        # Criar um dicionário para contar interseções e armazenar geometrias
+        intersection_info = defaultdict(list)
+        for feature in intersection_result['OUTPUT'].getFeatures():
+            via_id = feature['id_2']
+            drenagem_id = feature['id']
+            intersection_info[(via_id, drenagem_id)].append(feature.geometry())
+
+        # Verificar se os pontos de interseção correspondem a pontos na camada viário com tipo apropriado
+        for (via_id, drenagem_id), geometries in intersection_info.items():
+            for geometry in geometries:
+                # Encontrar pontos próximos na camada viário
+                search_buffer = geometry.buffer(max(buffer_lat, buffer_lon), 10)  
+                points_nearby = viario_layer.getFeatures(QgsFeatureRequest().setFilterRect(search_buffer.boundingBox()))
+                valid_type_found = False
+                for point in points_nearby:
+                    if point['tipo'] in (501, 401):  # Tipos de Travessia-Vau Natural ou Galeria/Bueiro
+                        valid_type_found = True
+                        break
+                if not valid_type_found:
+                    # Criar e adicionar um novo recurso indicando erro
+                    point_feature = QgsFeature(fields)
+                    point_feature.setGeometry(geometry)
+                    point_feature.setAttribute('trecho_drenagem_id', drenagem_id)
+                    point_feature.setAttribute('via_deslocamento_id', via_id)
+                    point_feature.setAttribute('tipo de erro', 'REGRA 3: interseção sem tipo de travessia válido')
+                    sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+
+        feedback.pushInfo("Verificação de tipo de travessia nas interseções concluída.")
+        ########## REGRA 4 - INTERSEÇÃO DE ELEMENTO VIÁRIO ##########
+        # Rodar o algoritmo de interseção entre linhas
+        intersection_result = processing.run("native:lineintersections", {
+            'INPUT': trecho_drenagem_layer,
+            'INTERSECT': via_deslocamento_layer,
+            'OUTPUT': 'memory:'
+        }, context=context, feedback=feedback)
+
+        # Coletar pontos de interseção
+        intersection_points = {feature.geometry().asPoint(): True for feature in intersection_result['OUTPUT'].getFeatures()}
+
+        # Verificar cada elemento viário com modal_uso = 4
+        for feature in viario_layer.getFeatures():
+            if feature['modal_uso'] == 4 and feature['tipo'] in (501, 401, 203):
+                # Verificar se a geometria do elemento viário coincide com algum ponto de interseção
+                if not intersection_points.get(feature.geometry().asPoint(), False):
+                    # Criar e adicionar um novo recurso indicando erro
+                    point_feature = QgsFeature(fields)
+                    point_feature.setGeometry(feature.geometry())
+                    point_feature.setAttribute('tipo de erro', 'REGRA 4: Elemento viário não coincidente com intersecção')
+                    sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+
+        feedback.pushInfo("Verificação de elementos viários conforme Regra 4 concluída.")
+        ########## REGRA 5 - PONTES DE MODAL VIÁRIOS E NÚMEROS DE FAIXAS/PISTAS ##########
+         # Extrair vértices das vias de deslocamento com seus atributos
+        vertices_info = {}
+        for feature in via_deslocamento_layer.getFeatures():
+            for point in feature.geometry().vertices():
+                point_key = (round(point.x(), 6), round(point.y(), 6))  # Usando uma tupla de coordenadas como chave, arredondada para consistência
+                vertices_info[point_key] = {
+                    'nr_faixas': feature['nr_faixas'],
+                    'nr_pistas': feature['nr_pistas'],
+                    'situacao_fisica': feature['situacao_fisica']
+                }
+        
+        # Verificar cada ponte na camada de elementos viários
+        for feature in viario_layer.getFeatures():
+            if feature['modal_uso'] == 4 and feature['tipo'] == 203:  # Modal rodoviário e tipo ponte
+                point_geom = feature.geometry().asPoint()
+                point_key = (round(point_geom.x(), 6), round(point_geom.y(), 6))
+
+                if point_key in vertices_info:
+                    via_attributes = vertices_info[point_key]
+                    if (feature['nr_faixas'] != via_attributes['nr_faixas'] or
+                        feature['nr_pistas'] != via_attributes['nr_pistas'] or
+                        feature['situacao_fisica'] != via_attributes['situacao_fisica']):
+                        point_feature = QgsFeature(fields)
+                        point_feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(point_geom.x(), point_geom.y())))
+                        point_feature.setAttribute('tipo de erro', 'Atributos de ponte não correspondem aos da via de deslocamento')
+                        sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+                else:
+                    # Se a ponte não coincide com nenhum vértice das vias
+                    point_feature = QgsFeature(fields)
+                    point_feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(point_geom.x(), point_geom.y())))
+                    point_feature.setAttribute('tipo de erro', 'Ponte não coincide com nenhum vértice das vias de deslocamento')
+                    sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+
+        feedback.pushInfo("Processamento da Regra 5 concluído.")
+        
+        ##########REGRA 6 - Barragens/Açude sem interseção com Barragem##########
+        massadagua_layer = layers[4]
+        barragem_layer = layers[3]
+        
+        feedback.pushInfo("Analisando interseções entre Massas d'Água e Barragens...")
+
+        for massadagua_feature in massadagua_layer.getFeatures():
+            if massadagua_feature['tipo'] in (10, 11):  # Verificando se o tipo é 10 ou 11
+                massadagua_geom = massadagua_feature.geometry()
+                intersects = False
+
+                for barragem_feature in barragem_layer.getFeatures():
+                    barragem_geom = barragem_feature.geometry()
+                    if massadagua_geom.intersects(barragem_geom):  # Checando interseção
+                        intersects = True
+                        break
+                
+                if not intersects:  # Se não há interseção
+                    centroide = massadagua_geom.centroid().asPoint()
+                    point_feature = QgsFeature(fields)
+                    point_feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(centroide)))
+                    point_feature.setAttribute('tipo de erro', "REGRA 6: Represa/Açude sem interseção com barragem.")
+                    sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+
+        feedback.pushInfo("Análise de interseção entre Massas d'Água e Barragens concluída.")
+        
+        ##########REGRA 7 - Trecho de drenagem/Sobreposição##########
+        novo_id_result = processing.run("native:fieldcalculator", {
+            'INPUT': barragem_layer,
+            'FIELD_NAME': 'novo_id',
+            'FIELD_TYPE': 0,  # 0 corresponde a tipo inteiro
+            'FORMULA': '$id',
+            'OUTPUT': 'memory:'
+        }, context=context, feedback=feedback)
+
+        # Atualiza barragem_layer com os novos IDs
+        barragem_layer = novo_id_result['OUTPUT']
+
+        # Usa o algoritmo 'extract by location' para encontrar interseções ou contato
+        extract_result = processing.run("native:extractbylocation", {
+            'INPUT': barragem_layer,
+            'PREDICATE': [0, 6],  # 0: intersect, 6: touches
+            'INTERSECT': via_deslocamento_layer,
+            'OUTPUT': 'memory:'
+        }, context=context, feedback=feedback)
+
+        intersected_ids = set()
+
+        # Processa as feições resultantes da extração
+        for feature in extract_result['OUTPUT'].getFeatures():
+            intersected_ids.add(feature['novo_id'])
+            sobreposto_attr = feature['sobreposto_transportes']
+            if sobreposto_attr == 2:
+                point_feature = QgsFeature(fields)
+                point_feature.setGeometry(feature.geometry().centroid())
+                point_feature.setAttribute('tipo de erro', "REGRA 7: Interseção ou contato presente, mas indicado como ausente")
+                point_feature.setAttribute('sobreposto_transportes', sobreposto_attr)
+                sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+
+        # Verifica as feições da camada original que não têm interseção ou contato
+        for feature in barragem_layer.getFeatures():
+            if feature['novo_id'] not in intersected_ids and feature['sobreposto_transportes'] == 1:
+                point_feature = QgsFeature(fields)
+                point_feature.setGeometry(feature.geometry().centroid())
+                point_feature.setAttribute('tipo de erro', "REGRA 7: Sem interseção nem contato, mas indicado como presente")
+                point_feature.setAttribute('sobreposto_transportes', feature['sobreposto_transportes'])
+                sink.addFeature(point_feature, QgsFeatureSink.FastInsert)
+
+        feedback.pushInfo("Análise de interseção concluída.")
+        return {self.OUTPUT: dest_id}

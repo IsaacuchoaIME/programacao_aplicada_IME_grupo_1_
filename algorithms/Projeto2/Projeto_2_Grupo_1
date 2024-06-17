@@ -1,0 +1,840 @@
+OBJETIVO PRINCIPAL
+
+# -- coding: utf-8 --
+
+"""
+*************************
+*                                                                         *
+*   This program is free software; you can redistribute it and/or modify  *
+*   it under the terms of the GNU General Public License as published by  *
+*   the Free Software Foundation; either version 2 of the License, or     *
+*   (at your option) any later version.                                   *
+*                                                                         *
+*************************
+"""
+
+
+from qgis.PyQt.QtCore import QCoreApplication
+from qgis.core import (QgsProcessing,                        
+                       QgsFeatureSink,
+                       QgsProcessingException,
+                       QgsProcessingAlgorithm,
+                       QgsProcessingParameterFeatureSource,
+                       QgsProcessingParameterFeatureSink,
+                       QgsProcessingParameterEnum,
+                       QgsRasterLayer,
+                       QgsProcessingParameterRasterLayer,
+                       QgsRaster,
+                       QgsProcessingMultiStepFeedback,
+                       QgsPointXY
+                       )
+from qgis import processing
+
+
+class ExampleProcessingAlgorithm2(QgsProcessingAlgorithm):
+
+    #INPUTS
+    CLVL = 'CLVL'
+    SCL = 'SCL'
+    PPPONTO = 'PPPONTO'
+    PPLINHA = 'PPLINHA'
+    PPAREA = 'PPAREA'
+    MDT = 'MDT'
+    
+    #OUTPUTS
+    PPPONTO2 = 'PPPONTO2'
+    PPLINHA2 = 'PPLINHA2'
+    PPAREA2 = 'PPAREA2'
+    CLVL2 = 'CLVL2'
+
+    def tr(self, string):
+        return QCoreApplication.translate('Processing', string)
+
+    def createInstance(self):
+        return ExampleProcessingAlgorithm()
+
+    def name(self):
+        return 'Atribuir altitudes'
+
+    def displayName(self):
+        return self.tr('Atribuir altitudes')
+
+    def group(self):
+        """
+        Returns the name of the group this algorithm belongs to. This string
+        should be localised.
+        """
+        return self.tr('ProgAplicada')
+
+    def groupId(self):
+        return 'Projeto2'
+
+    def shortHelpString(self):
+        return self.tr("Este algoritmo cria camadas em que o atributo 'altitude' das pistas de pouso são atribuídos com precisão de uma casa decimal.\n Além disso, cria uma camada que seleciona as curvas de nível correspondentes à escala escolhida pelo usuário, classificando as curvas em: \nMestra (1). \n ou\n Normal (2).")
+
+    def initAlgorithm(self, config=None):
+        # We add the input vector features source. It can have any kind of
+        # geometry.
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.CLVL,
+                self.tr('Camada de Curvas de Nível'),
+                [QgsProcessing.TypeVectorLine]
+            )
+        )
+        
+        self.addParameter(
+             QgsProcessingParameterEnum(
+                 self.SCL,
+                 self.tr('Escala do mapa'),
+                 options=["1:25.000 - 10m", "1:50.000 - 20m", "1:100.000 - 50m", "1:250.000 - 100m"],
+                 defaultValue=0
+             )
+         )
+        
+        self.addParameter(
+             QgsProcessingParameterRasterLayer(
+                 self.MDT,
+                 self.tr('Modelo Digital de Terreno')
+             )
+         )
+         
+        self.addParameter(
+             QgsProcessingParameterFeatureSource(
+                 self.PPPONTO,
+                 self.tr('Pista de pouso (ponto)'),
+                 [QgsProcessing.TypeVectorPoint]
+             )
+         )
+        
+        self.addParameter(
+             QgsProcessingParameterFeatureSource(
+                 self.PPLINHA,
+                 self.tr('Pista de pouso (linha)'),
+                 [QgsProcessing.TypeVectorLine]
+             )
+         )
+        
+        self.addParameter(
+             QgsProcessingParameterFeatureSource(
+                 self.PPAREA,
+                 self.tr('Pista de pouso (area)'),
+                 [QgsProcessing.TypeVectorPolygon]
+             )
+         )
+
+        # We add a feature sink in which to store our processed features (this
+        # usually takes the form of a newly created vector layer when the
+        # algorithm is run in QGIS).
+        self.addParameter(
+            QgsProcessingParameterFeatureSink(
+                self.CLVL2,
+                self.tr('Curvas de Nível e Mestras')
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSink(
+                self.PPPONTO2,
+                self.tr('Pistas de pouso (ponto) com altitude')
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSink(
+                self.PPLINHA2,
+                self.tr('Pistas de pouso (linha) com altitude')
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSink(
+                self.PPAREA2,
+                self.tr('Pistas de pouso (area) com altitude')
+            )
+        )
+        
+    def processAlgorithm(self, parameters, context, feedback):
+        # Retrieve the feature source and sink. The 'dest_id' variable is used
+        # to uniquely identify the feature sink, and must be included in the
+        # dictionary returned by the processAlgorithm function.
+        source = self.parameterAsSource(
+            parameters,
+            self.CLVL,
+            context
+        )
+        
+        escala = self.parameterAsEnum(
+            parameters,
+            self.SCL,
+            context
+        )
+        
+        mdt = self.parameterAsRasterLayer(
+            parameters,
+            self.MDT,
+            context
+        )
+        
+        pppoint = self.parameterAsSource(
+            parameters,
+            self.PPPONTO,
+            context
+        )
+        
+        ppline = self.parameterAsSource(
+            parameters,
+            self.PPLINHA,
+            context
+        )
+        
+        pparea = self.parameterAsSource(
+            parameters,
+            self.PPAREA,
+            context
+        )
+        
+        #Criando o parametro "p" para auxiliar na criação da camada das curvas de nível
+        if escala == 0:
+            p = 10
+        elif escala == 1:
+            p = 20
+        elif escala == 2:
+            p = 50
+        elif escala == 3:
+            p = 100
+            
+        # If source was not found, throw an exception to indicate that the algorithm
+        # encountered a fatal error. The exception text can be any string, but in this
+        # case we use the pre-built invalidSourceError method to return a standard
+        # helper text for when a source cannot be evaluated
+        if source is None:
+            raise QgsProcessingException(self.invalidSourceError(parameters, self.CLVL))
+
+        (sink, dest_id) = self.parameterAsSink(
+            parameters,
+            self.CLVL2,
+            context,
+            source.fields(),
+            source.wkbType(),
+            source.sourceCrs()
+        )
+        
+        (ppp, dest_id_ppp) = self.parameterAsSink(
+            parameters,
+            self.PPPONTO2,
+            context,
+            pppoint.fields(),
+            pppoint.wkbType(),
+            pppoint.sourceCrs()
+        )
+        
+        (ppl, dest_id_ppl) = self.parameterAsSink(
+            parameters,
+            self.PPLINHA2,
+            context,
+            ppline.fields(),
+            ppline.wkbType(),
+            ppline.sourceCrs()
+        )
+        
+        (ppa, dest_id_ppa) = self.parameterAsSink(
+            parameters,
+            self.PPAREA2,
+            context,
+            pparea.fields(),
+            pparea.wkbType(),
+            pparea.sourceCrs()
+        )
+        # Send some information to the user
+        feedback.pushInfo('CRS is {}'.format(source.sourceCrs().authid()))
+
+        # If sink was not created, throw an exception to indicate that the algorithm
+        # encountered a fatal error. The exception text can be any string, but in this
+        # case we use the pre-built invalidSinkError method to return a standard
+        # helper text for when a sink cannot be evaluated
+        if sink is None:
+            raise QgsProcessingException(self.invalidSinkError(parameters, self.CLVL2))
+        if ppp is None:
+            raise QgsProcessingException(self.invalidSinkError(parameters, self.PPPONTO2))
+        if ppl is None:
+            raise QgsProcessingException(self.invalidSinkError(parameters, self.PPLINHA2))
+        if ppa is None:
+            raise QgsProcessingException(self.invalidSinkError(parameters, self.PPAREA2))
+
+        # Compute the number of steps to display within the progress bar and
+        # get features from source
+        total = 100.0 / source.featureCount() if source.featureCount() else 0
+        multiStepFeedback = QgsProcessingMultiStepFeedback(5, feedback)
+        multiStepFeedback.setCurrentStep(0)
+########################TAREFA 1: CURVAS DE NÍVEL#######################
+        features1 = source.getFeatures()
+        for current, feature in enumerate(features1):
+            # Stop the algorithm if cancel button has been clicked
+            if multiStepFeedback.isCanceled():
+                break
+
+            # Selecionando as curvas
+            if feature["cota"] % p != 0:
+                continue
+            if feature["cota"] % p == 0:
+                feature["indice"] = 2
+            if feature["cota"] % (p*5) == 0:
+                feature["indice"] = 1
+            sink.addFeature(feature, QgsFeatureSink.FastInsert)
+            
+            # Update the progress bar
+            multiStepFeedback.setProgress(int(current * total))
+        
+        multiStepFeedback.setCurrentStep(1)
+######################TAREFA 2: PPPONTO #########################      
+        # Obtém os recursos (features) da camada de pontos
+        features1 = pppoint.getFeatures()
+        
+        #Itera sobre cada recurso (feature)
+        for current, feature in enumerate(features1):
+            # Parar o algoritmo se o botão de cancelamento foi clicado
+            if multiStepFeedback.isCanceled():
+                break
+            
+            # Obter a geometria do ponto
+            feature_geom = feature.geometry()
+            # Obter as coordenadas do ponto
+            feature_coord = feature_geom.asPoint()
+
+            # Realizar a amostragem do raster MDT na posição do ponto atual
+            value = mdt.dataProvider().identify(feature_coord, QgsRaster.IdentifyFormatValue).results()[1]
+            
+            # Arredonda o valor para uma casa decimal
+            final_value = round(value, 1)
+
+            # Adicionar a altitude como atributo no recurso (feature)
+            feature["altitude"] = final_value
+            
+            ppp.addFeature(feature, QgsFeatureSink.FastInsert)
+            
+            multiStepFeedback.setProgress(int(current * total))
+        
+        multiStepFeedback.setCurrentStep(2)
+######################TAREFA 3: PPLINHA #########################   
+        # Obtém os recursos (features) da camada de multilinhas
+        features2 = ppline.getFeatures()
+
+        #Itera sobre cada recurso (feature)
+        for current, feature in enumerate(features2):
+            # Parar o algoritmo se o botão de cancelamento foi clicado
+            if multiStepFeedback.isCanceled():
+                break
+
+            # Obter a geometria da multilinha
+            feature_geom = feature.geometry()
+
+            # Inicializar uma lista para armazenar as alturas dos pontos
+            heights = []
+
+            # Iterar sobre cada parte de linha na geometria da multilinha
+            for part in feature_geom.parts():
+            # Iterar sobre cada ponto na parte da linha
+                for point in part:
+                    # Converta o ponto para QgsPointXY
+                    point_xy = QgsPointXY(point)
+                    
+                    # Realizar a amostragem do raster MDT na posição do ponto atual
+                    value = mdt.dataProvider().identify(point_xy, QgsRaster.IdentifyFormatValue).results()[1]
+                    
+                    # Adicionar o valor da altura à lista de alturas
+                    heights.append(value)
+
+            # Calcular a média das alturas
+            if heights:
+                average_height = sum(heights) / len(heights)
+            else:
+                # Se não houver alturas, definir a média como 0
+                average_height = 0.0
+
+            # Arredonda o valor para uma casa decimal
+            final_value = round(average_height, 1)
+
+            # Adicionar a altitude como atributo no recurso (feature)
+            feature["altitude"] = final_value
+
+            ppl.addFeature(feature, QgsFeatureSink.FastInsert)
+            
+            multiStepFeedback.setProgress(int(current * total))
+        
+        multiStepFeedback.setCurrentStep(3)
+            
+######################TAREFA 4: PPAREA #########################   
+        # Obtém os recursos (features) da camada de multilinhas
+        features3 = pparea.getFeatures()
+
+        # Itera sobre cada recurso (feature)
+        for current, feature in enumerate(features3):
+            if multiStepFeedback.isCanceled():
+                break
+
+            # Obter a geometria do polígono
+            feature_geom = feature.geometry()
+
+            # Verifica se a geometria é válida
+            if feature_geom is None:
+                print("Erro: A geometria do polígono não é válida.")
+                continue
+
+            # Obter o centroide da parte do polígono (polígono individual)
+            centroid = feature_geom.centroid()
+
+            # Verifica se o centroide é válido
+            if centroid is None:
+                print("Erro: Não foi possível calcular o centroide do polígono.")
+                continue
+
+            # Realizar a amostragem do raster MDT no centroide do polígono
+            ident_result = mdt.dataProvider().identify(centroid.asPoint(), QgsRaster.IdentifyFormatValue)
+
+            # Verifica se a identificação foi bem-sucedida
+            if not ident_result.isValid():
+                print("Erro: Não foi possível identificar a altitude para o centroide do polígono.")
+                continue
+
+            # Obtém o valor da altitude
+            value = ident_result.results()[1]
+
+            # Arredondar para uma única casa decimal
+            final_value = round(value, 1)
+
+            # Adicionar a altitude como atributo no recurso (feature)
+            feature["altitude"] = final_value
+
+            # Adicionar o novo recurso (feature) à camada
+            ppa.addFeature(feature, QgsFeatureSink.FastInsert)
+            
+            multiStepFeedback.setProgress(int(current * total))
+        
+        multiStepFeedback.setCurrentStep(4)
+            
+        # Return the results of the algorithm. In this case our only result is
+        # the feature sink which contains the processed features, but some
+        # algorithms may return multiple feature sinks, calculated numeric
+        # statistics, etc. These should all be included in the returned
+        # dictionary, with keys matching the feature corresponding parameter
+        # or output names.
+        return {self.CLVL2: dest_id,
+                self.PPPONTO2: dest_id_ppp,
+                self.PPLINHA2: dest_id_ppl,
+                self.PPAREA2: dest_id_ppa
+                }
+
+CENTROIDES
+# -- coding: utf-8 --
+
+"""
+*********
+*                                                                         *
+*   This program is free software; you can redistribute it and/or modify  *
+*   it under the terms of the GNU General Public License as published by  *
+*   the Free Software Foundation; either version 2 of the License, or     *
+*   (at your option) any later version.                                   *
+*                                                                         *
+*********
+"""
+
+from qgis.PyQt.QtCore import QCoreApplication
+from qgis.core import (QgsProcessing,
+                       QgsFeatureSink,
+                       QgsProcessingException,
+                       QgsProcessingAlgorithm,
+                       QgsProcessingParameterFeatureSource,
+                       QgsProcessingParameterFeatureSink,
+                       QgsProcessingParameterRasterLayer,
+                       QgsGeometry,
+                       QgsFeature,
+                       QgsWkbTypes,
+                       QgsRaster
+                       )
+from qgis import processing
+
+
+class ExampleProcessingAlgorithm(QgsProcessingAlgorithm):
+    # Constants used to refer to parameters and outputs. They will be
+    # used when calling the algorithm from another algorithm, or when
+    # calling from the QGIS console.
+
+    CLVL = 'CLVL'
+    MOLD = 'MOLD'
+    MDT = 'MDT'
+    COT = 'COT'
+
+    def tr(self, string):
+        return QCoreApplication.translate('Processing', string)
+
+    def createInstance(self):
+        return ExampleProcessingAlgorithm()
+
+    def name(self):
+         return 'myscript'
+
+    def displayName(self):
+        return self.tr('My Script')
+
+    def group(self):
+        return self.tr('Example scripts')
+
+    def groupId(self):
+        return 'examplescripts'
+
+    def shortHelpString(self):
+        return self.tr("Example algorithm short description")
+
+    def initAlgorithm(self, config=None):
+        # We add the input vector features source. It can have any kind of
+        # geometry.
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.CLVL,
+                self.tr('Curva de nível'),
+                [QgsProcessing.TypeVectorLine]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterRasterLayer(
+                self.MDT,
+                self.tr('MDT'),
+                [QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.MOLD,
+                self.tr('Moldura'),
+                [QgsProcessing.TypeVectorPolygon]
+            )
+        )
+
+        # We add a feature sink in which to store our processed features (this
+        # usually takes the form of a newly created vector layer when the
+        # algorithm is run in QGIS).
+        self.addParameter(
+            QgsProcessingParameterFeatureSink(
+                self.COT,
+                self.tr('Output Layer')
+            )
+        )
+
+    def processAlgorithm(self, parameters, context, feedback):
+   
+        source = self.parameterAsSource(
+            parameters,
+            self.CLVL,
+            context
+        )
+        
+        moldura = self.parameterAsSource(
+            parameters,
+            self.MOLD,
+            context
+        )
+        
+        mdt = self.parameterAsRasterLayer(
+            parameters,
+            self.MDT,
+            context
+        )
+
+        # If source was not found, throw an exception to indicate that the algorithm
+        # encountered a fatal error. The exception text can be any string, but in this
+        # case we use the pre-built invalidSourceError method to return a standard
+        # helper text for when a source cannot be evaluated
+        if source is None:
+            raise QgsProcessingException(self.invalidSourceError(parameters, self.INPUT))
+        
+        geom_type = QgsWkbTypes.PolygonGeometry
+
+        (sink, dest_id) = self.parameterAsSink(
+            parameters,
+            self.COT,
+            context,
+            moldura.fields(),
+            QgsWkbTypes.Point,
+            source.sourceCrs()
+        )
+
+        # Send some information to the user
+        feedback.pushInfo('CRS is {}'.format(source.sourceCrs().authid()))
+
+        if sink is None:
+            raise QgsProcessingException(self.invalidSinkError(parameters, self.OUTPUT))
+
+        # Compute the number of steps to display within the progress bar and
+        # get features from source
+        total = 100.0 / source.featureCount() if source.featureCount() else 0
+        features = source.getFeatures()
+        
+        # Obter a geometria da camada moldura
+        moldura_features = moldura.getFeatures()
+        if moldura_features:
+            moldura_geom = next(moldura_features).geometry()
+        
+        polygons = {}
+        
+        for current, feature in enumerate(features):
+            # Verificar se a feição está contida dentro da camada moldura
+            if feature.geometry().within(moldura_geom):
+                # Converter a linha em polígonos segmentados
+                segments = feature.geometry().asMultiPolyline()
+            
+                for segment in segments:
+                    # Converter cada segmento em um polígono individual
+                    polygon = QgsGeometry.fromPolygonXY([segment])
+
+                    # Verificar se há interseção com outros polígonos
+                    intersection = False
+                    for poly_id, poly_geom in polygons.items():
+                        if polygon.intersects(poly_geom):
+                            intersection = True
+                            break
+                    # Se não houver interseção, adicionar o polígono
+                    if not intersection:
+                        polygons[feature.id()] = polygon
+
+                        # Criar um objeto QgsFeature com o ponto do centroide do polígono
+                        centroid = polygon.centroid().asPoint()
+                        centroid_feature = QgsFeature()
+                        centroid_feature.setGeometry(QgsGeometry.fromPointXY(centroid))
+                        
+                        # Adicionar o ID da feição original como atributo
+                        centroid_feature.setAttributes([feature.id()])
+                        
+                        # Obter a altura do centróide na camada raster MDT
+                        height = mdt.dataProvider().identify(centroid, QgsRaster.IdentifyFormatValue).results()[1]
+
+                        # Adicionar a altura como atributo
+                        centroid_feature.setAttributes([feature.id(), height])
+                        # Adicionar a feature à sink
+                        sink.addFeature(centroid_feature, QgsFeatureSink.FastInsert)
+
+        return{self.COT: dest_id}
+
+PARTE 3
+
+# -- coding: utf-8 --
+
+"""
+*************************
+*                                                                         *
+*   This program is free software; you can redistribute it and/or modify  *
+*   it under the terms of the GNU General Public License as published by  *
+*   the Free Software Foundation; either version 2 of the License, or     *
+*   (at your option) any later version.                                   *
+*                                                                         *
+*************************
+"""
+
+from qgis.PyQt.QtCore import QCoreApplication
+from qgis.core import (QgsProcessing,
+                       QgsFeatureSink,
+                       QgsProcessingException,
+                       QgsProcessingAlgorithm,
+                       QgsProcessingParameterFeatureSource,
+                       QgsProcessingParameterFeatureSink,
+                       QgsProcessingParameterRasterLayer,
+                       QgsGeometry,
+                       QgsFeature,
+                       QgsWkbTypes,
+                       QgsVectorLayer
+                       )
+from qgis import processing
+
+
+class ExampleProcessingAlgorithm(QgsProcessingAlgorithm):
+    # Constants used to refer to parameters and outputs. They will be
+    # used when calling the algorithm from another algorithm, or when
+    # calling from the QGIS console.
+
+    CLVL = 'CLVL'
+    MOLD = 'MOLD'
+    MDT = 'MDT'
+    COT = 'COT'
+
+    def tr(self, string):
+        return QCoreApplication.translate('Processing', string)
+
+    def createInstance(self):
+        return ExampleProcessingAlgorithm()
+
+    def name(self):
+         return 'myscript'
+
+    def displayName(self):
+        return self.tr('My Script')
+
+    def group(self):
+        return self.tr('Example scripts')
+
+    def groupId(self):
+        return 'examplescripts'
+
+    def shortHelpString(self):
+        return self.tr("Example algorithm short description")
+
+    def initAlgorithm(self, config=None):
+        # We add the input vector features source. It can have any kind of
+        # geometry.
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.CLVL,
+                self.tr('Curva de nível'),
+                [QgsProcessing.TypeVectorLine]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterRasterLayer(
+                self.MDT,
+                self.tr('MDT'),
+                [QgsProcessing.TypeVectorAnyGeometry]
+            )
+        )
+        
+        self.addParameter(
+            QgsProcessingParameterFeatureSource(
+                self.MOLD,
+                self.tr('Moldura'),
+                [QgsProcessing.TypeVectorPolygon]
+            )
+        )
+
+        # We add a feature sink in which to store our processed features (this
+        # usually takes the form of a newly created vector layer when the
+        # algorithm is run in QGIS).
+        self.addParameter(
+            QgsProcessingParameterFeatureSink(
+                self.COT,
+                self.tr('Output Layer')
+            )
+        )
+
+    def processAlgorithm(self, parameters, context, feedback):
+   
+        source = self.parameterAsSource(
+            parameters,
+            self.CLVL,
+            context
+        )
+        
+        moldura = self.parameterAsSource(
+            parameters,
+            self.MOLD,
+            context
+        )
+        
+        mdt = self.parameterAsRasterLayer(
+            parameters,
+            self.MDT,
+            context
+        )
+
+        # If source was not found, throw an exception to indicate that the algorithm
+        # encountered a fatal error. The exception text can be any string, but in this
+        # case we use the pre-built invalidSourceError method to return a standard
+        # helper text for when a source cannot be evaluated
+        if source is None:
+            raise QgsProcessingException(self.invalidSourceError(parameters, self.INPUT))
+        
+        geom_type = QgsWkbTypes.PolygonGeometry
+
+        (sink, dest_id) = self.parameterAsSink(
+            parameters,
+            self.COT,
+            context,
+            moldura.fields(),
+            QgsWkbTypes.Point,
+            source.sourceCrs()
+        )
+
+        # Send some information to the user
+        feedback.pushInfo('CRS is {}'.format(source.sourceCrs().authid()))
+
+        if sink is None:
+            raise QgsProcessingException(self.invalidSinkError(parameters, self.OUTPUT))
+
+        # Compute the number of steps to display within the progress bar and
+        # get features from source
+        total = 100.0 / source.featureCount() if source.featureCount() else 0
+        features = source.getFeatures()
+        
+        # Obter a geometria da camada moldura
+        moldura_features = moldura.getFeatures()
+        if moldura_features:
+            moldura_geom = next(moldura_features).geometry()
+        
+        polygons = {}
+        
+        for current, feature in enumerate(features):
+            # Verificar se a feição está contida dentro da camada moldura
+            if feature.geometry().within(moldura_geom):
+                # Converter a linha em polígonos segmentados
+                segments = feature.geometry().asMultiPolyline()
+            
+                for segment in segments:
+                    # Converter cada segmento em um polígono individual
+                    polygon = QgsGeometry.fromPolygonXY([segment])
+
+                    # Verificar se há interseção com outros polígonos
+                    intersection = False
+                    for poly_id, poly_geom in polygons.items():
+                        if polygon.intersects(poly_geom):
+                            intersection = True
+                            break
+                    # Se não houver interseção, adicionar o polígono
+                    if not intersection:
+                        polygons[feature.id()] = polygon
+                        
+                        # Criar um objeto QgsFeature com a geometria do polígono
+                        polygon_feature = QgsFeature()
+                        polygon_feature.setGeometry(polygon)
+                        # Adicionar o ID da feição original como atributo
+                        polygon_feature.setAttributes([feature.id()])
+                        #CRIANDO A CAMADA TEMPORÁRIA 
+                        temp_layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "temp_layer", "memory")
+                        provider = temp_layer.dataProvider()
+                        fields = source.fields()
+                        provider.addAttributes(fields)
+                        temp_layer.updateFields()
+                        #Adicionando o polígono à camada temporária
+                        temp_layer.addFeature(polygon_feature)
+                        camada = processing.run("gdal:cliprasterbymasklayer", 
+                                                {'INPUT': 'mdt',
+                                                'MASK':'dest_id',
+                                                'SOURCE_CRS':None,
+                                                'TARGET_CRS':None,
+                                                'TARGET_EXTENT':None,
+                                                'NODATA':None,
+                                                'ALPHA_BAND':False,
+                                                'CROP_TO_CUTLINE':True,
+                                                'KEEP_RESOLUTION':False,
+                                                'SET_RESOLUTION':False,
+                                                'X_RESOLUTION':None,
+                                                'Y_RESOLUTION':None,
+                                                'MULTITHREADING':False,
+                                                'OPTIONS':'','DATA_TYPE':0,
+                                                'EXTRA':'',
+                                                'OUTPUT':'TEMPORARY_OUTPUT'})
+                        
+                        pontos = processing.run("native:pixelstopoints", 
+                                                {'INPUT_RASTER':'camada',
+                                                'RASTER_BAND':1,
+                                                'FIELD_NAME':'VALUE',
+                                                'OUTPUT':'TEMPORARY_OUTPUT'})
+                        maior = pontos[0]
+                        for ponto in pontos:
+                            if ponto['VALUE'] >= maior['VALUE']:
+                                maior = ponto
+                            
+                        # Adicionar a feature à sink
+                        sink.addFeature(maior, QgsFeatureSink.FastInsert)
+                        
+      
+        return {self.COT: dest_id}
