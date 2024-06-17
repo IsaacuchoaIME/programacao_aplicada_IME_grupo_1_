@@ -31,7 +31,7 @@ from qgis.core import (QgsProcessing,
 from qgis import processing
 
 
-class ExampleProcessingAlgorithm2(QgsProcessingAlgorithm):
+class Solucao2(QgsProcessingAlgorithm):
 
     #INPUTS
     CLVL = 'CLVL'

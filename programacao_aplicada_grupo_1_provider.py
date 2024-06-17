@@ -32,9 +32,9 @@ __copyright__ = '(C) 2024 by Grupo 1'
 __revision__ = '$Format:%H$'
 
 from qgis.core import QgsProcessingProvider
-from .algorithms.Projeto1.Projeto_1_Grupo_1 import ExampleProcessingAlgorithm
-from .algorithms.Projeto2.Projeto_2_Grupo_1 import ExampleProcessingAlgorithm2
-from .algorithms.Projeto3.Projeto_3_Grupo_1 import Projeto3Solucao
+from .algorithms.Projeto1.Projeto_1_Grupo_1 import Solucao1
+from .algorithms.Projeto2.Projeto_2_Grupo_1 import Solucao2
+from .algorithms.Projeto3.Projeto_3_Grupo_1 import Solucao3
 from .algorithms.Projeto4.Projeto_4_Grupo_1 import Solucao4
 
 
@@ -57,9 +57,9 @@ class ProgramacaoAplicadaGrupo1Provider(QgsProcessingProvider):
         """
         Loads all algorithms belonging to this provider.
         """
-        self.addAlgorithm(ExampleProcessingAlgorithm())
-        self.addAlgorithm(ExampleProcessingAlgorithm2())
-        self.addAlgorithm(Projeto3Solucao())
+        self.addAlgorithm(Solucao1())
+        self.addAlgorithm(Solucao2())
+        self.addAlgorithm(Solucao3())
         self.addAlgorithm(Solucao4())
      
 

@@ -25,7 +25,7 @@ from qgis import processing
 from qgis.core import QgsProject
 
 
-class ExampleProcessingAlgorithm(QgsProcessingAlgorithm):
+class Solucao1(QgsProcessingAlgorithm):
     """
     This is an example algorithm that takes a vector layer and
     creates a new identical one.

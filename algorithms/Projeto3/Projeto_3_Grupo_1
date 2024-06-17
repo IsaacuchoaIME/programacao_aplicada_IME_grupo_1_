@@ -23,7 +23,7 @@ from qgis.core import (QgsProcessing,
 from qgis import processing
 
 
-class Projeto3Solucao(QgsProcessingAlgorithm):
+class Solucao3(QgsProcessingAlgorithm):
     # INPUTS
     TRACKER = 'TRACKER'
     CMD1 = 'CMD1'
